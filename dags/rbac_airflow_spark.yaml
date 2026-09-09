@@ -1,0 +1,51 @@
+# NOT REQUIRED ON PCAI (verified 2026-09-07): churn_pipeline ran to success on pcai1dev
+# without this. PCAI launches the Airflow task pod inside the triggering user's namespace
+# with an identity that can already create SparkApplications there. Keep this file only
+# for a plain Airflow install whose task pod lacks that right.
+#
+# RBAC the Airflow task would need in order to run churn_pipeline_dag.py.
+#
+# The DAG talks to the Kubernetes API directly: it creates a SparkApplication in
+# the lab namespace, polls it, and reads the driver pod's log. Apply this ONCE per
+# cluster from an admin context, after filling in the two placeholders:
+#
+#   LAB_NAMESPACE  the namespace Spark jobs run in AND the namespace PCAI launches the
+#                  Airflow task pod into (event log: dag_deployed_in_user_ns), i.e. the
+#                  triggering user's project namespace, e.g. project-user-haris
+#   AIRFLOW_SA     the service account that task pod runs as. Catch it while a run is
+#                  in progress (from any notebook in that namespace):
+#                    kubectl get pod -n project-user-haris \
+#                      -o custom-columns=NAME:.metadata.name,SA:.spec.serviceAccountName
+#                  Expected: default-editor (the same SA notebooks use).
+#
+#   sed -e 's/LAB_NAMESPACE/project-user-haris/g' -e 's/AIRFLOW_SA/default-editor/' \
+#       rbac_airflow_spark.yaml | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lab18-airflow-spark
+  namespace: LAB_NAMESPACE
+rules:
+  - apiGroups: ["sparkoperator.hpe.com"]
+    resources: ["sparkapplications"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lab18-airflow-spark
+  namespace: LAB_NAMESPACE
+subjects:
+  - kind: ServiceAccount
+    name: AIRFLOW_SA
+    namespace: LAB_NAMESPACE
+roleRef:
+  kind: Role
+  name: lab18-airflow-spark
+  apiGroup: rbac.authorization.k8s.io
