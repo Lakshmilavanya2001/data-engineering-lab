@@ -47,11 +47,31 @@ from airflow.models import Variable
 def _cfg(key, default):
     return Variable.get(f"lab18_{key}", default_var=default)
 
+# PCAI launches every task pod inside the TRIGGERING USER's project namespace
+# (event log: dag_deployed_in_user_ns). The SparkApplication must be created in that
+# same namespace, as that same user -- a pod in project-user-alice cannot create
+# objects in project-user-haris. So NAMESPACE and SPARK_USER are resolved AT RUN TIME
+# from the pod itself; the values below are only parse-time defaults, overridable
+# with Airflow Variables lab18_namespace / lab18_spark_user if a cluster needs it.
 NAMESPACE       = _cfg("namespace",       "project-user-haris")
 SPARK_IMAGE     = _cfg("spark_image",     "10.79.253.45/ezmeral-common/hpe-spark/spark:v3.5.5.2.1")
 SERVICE_ACCOUNT = _cfg("service_account", "spark-runner")
 PULL_SECRET     = "imagepull"
-SPARK_USER      = _cfg("spark_user",      "haris")   # jobs run as the instructor; students own only their paths
+SPARK_USER      = _cfg("spark_user",      "haris")
+
+SA_NS_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+def _runtime_target():
+    """(namespace, spark_user) for THIS task pod. Falls back to the configured
+    defaults when not running in Kubernetes (e.g. DAG parse on a laptop)."""
+    try:
+        ns = open(SA_NS_FILE).read().strip()
+    except Exception:
+        return NAMESPACE, SPARK_USER
+    if not ns:
+        return NAMESPACE, SPARK_USER
+    user = ns[len("project-user-"):] if ns.startswith("project-user-") else SPARK_USER
+    return ns, user
 
 # Volume as SPARK sees it. The notebook sees the same files at ~/shared/...
 SPARK_BASE = "/mounts/shared-volume/shared/data-engineering-lab"
@@ -111,13 +131,15 @@ def _sid(context):
     return f"{n:02d}"
 
 
-def build_spec(sid):
+def build_spec(sid, namespace=None, spark_user=None):
+    namespace  = namespace  or NAMESPACE
+    spark_user = spark_user or SPARK_USER
     return {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "SparkApplication",
         "metadata": {
             "name": f"curate-student-{sid}",
-            "namespace": NAMESPACE,
+            "namespace": namespace,
             "labels": {
                 "hpe-ezua/app": "spark",
                 "hpe-ezua/type": "app-service-user",
@@ -138,11 +160,11 @@ def build_spec(sid):
             "sparkConf": {
                 "spark.eventLog.enabled": "true",
                 "spark.eventLog.dir": "file:///opt/mapr/spark/sparkhs-eventlog-storage",
-                "spark.executorEnv.SPARK_USER": SPARK_USER,
-                "spark.kubernetes.driverEnv.SPARK_USER": SPARK_USER,
+                "spark.executorEnv.SPARK_USER": spark_user,
+                "spark.kubernetes.driverEnv.SPARK_USER": spark_user,
                 "spark.mapr.user.secret": "hpe-autotix-generated-secret",
                 "spark.mapr.user.secret.autogen": "true",
-                "spark.ui.view.acls": NAMESPACE,
+                "spark.ui.view.acls": namespace,
             },
             "volumes": VOLUMES,
             "driver": {
@@ -164,17 +186,19 @@ def submit_and_wait(**context):
     sid = _sid(context)
     name = f"curate-student-{sid}"
     api, core = _k8s()
+    ns, spark_user = _runtime_target()
+    print(f"[dag] namespace {ns}   spark user {spark_user}")
 
     # Idempotency: a re-run replaces the old application rather than colliding.
     try:
-        api.delete_namespaced_custom_object(GROUP, VERSION, NAMESPACE, PLURAL, name)
+        api.delete_namespaced_custom_object(GROUP, VERSION, ns, PLURAL, name)
         print(f"[dag] deleted previous {name}")
         time.sleep(5)
     except Exception:
         pass
 
-    api.create_namespaced_custom_object(GROUP, VERSION, NAMESPACE, PLURAL,
-                                        build_spec(sid))
+    api.create_namespaced_custom_object(GROUP, VERSION, ns, PLURAL,
+                                        build_spec(sid, ns, spark_user))
     print(f"[dag] submitted {name}")
     print(f"[dag]   reads  {RAW_PATH}")
     print(f"[dag]   writes {OUT_TMPL.format(sid=sid)}")
@@ -182,32 +206,32 @@ def submit_and_wait(**context):
     deadline, last = time.time() + TIMEOUT_MINUTES * 60, None
     while time.time() < deadline:
         time.sleep(POLL_SECONDS)
-        obj = api.get_namespaced_custom_object(GROUP, VERSION, NAMESPACE, PLURAL, name)
+        obj = api.get_namespaced_custom_object(GROUP, VERSION, ns, PLURAL, name)
         state = obj.get("status", {}).get("applicationState", {}).get("state", "PENDING")
         if state != last:
             print(f"[dag] {time.strftime('%H:%M:%S')}  {state}")
             last = state
 
         if state == "COMPLETED":
-            _tail_driver_log(core, name)
+            _tail_driver_log(core, name, ns)
             return f"{name} completed"
 
         if state in ("FAILED", "SUBMISSION_FAILED"):
             msg = obj.get("status", {}).get("applicationState", {}).get(
                 "errorMessage", "(no message)")
-            _tail_driver_log(core, name)
+            _tail_driver_log(core, name, ns)
             raise AirflowFailException(f"Spark job {state}: {msg}")
 
     raise AirflowFailException(f"timed out after {TIMEOUT_MINUTES} min in state {last}")
 
 
-def _tail_driver_log(core, name, lines=40):
+def _tail_driver_log(core, name, namespace, lines=40):
     """Surface the job's own summary in the Airflow log, so a student never has to
     go hunting in the Spark UI to find out whether their run was correct."""
     try:
         print(f"\n[dag] ---- driver log (last {lines} lines) ----")
         print(core.read_namespaced_pod_log(name=f"{name}-driver",
-                                           namespace=NAMESPACE, tail_lines=lines))
+                                           namespace=namespace, tail_lines=lines))
     except Exception as e:
         print(f"[dag] could not read driver log: {e}")
 
