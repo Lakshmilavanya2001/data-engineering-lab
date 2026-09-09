@@ -143,6 +143,10 @@ Two traps it works around, both found on real PCAI images:
   and leaves the environment worse. So packages are installed first and the NumPy/pandas
   pair corrected afterwards. mlflow prints a version warning and works correctly.
 
+**Until the image is baked**, run `setup_notebook_env.sh` once from a JupyterLab terminal
+(`bash ~/pcai-dataeng-lab/setup_notebook_env.sh`, 5-10 min, then restart the kernel). It installs
+in the proven order and is a no-op when the environment is already complete.
+
 **The real fix is to bake the image**, so 1.1 is always a no-op:
 
 ```
