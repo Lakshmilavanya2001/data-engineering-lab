@@ -118,6 +118,8 @@ BLOCKS=[
 # ─────────────────────────── Pipeline overview ───────────────────────────
 ('h1','Pipeline overview'),
 ('lead','The lab runs as a pipeline. Each stage produces an artifact the next stage consumes, and the row count changes at every step.'),
+('figure','shots/00_architecture.png','Lab architecture on HPE Private Cloud AI. Solid arrows carry rows; dashed arrows carry instructions. Airflow sits on a dashed path only.'),
+('p','Three things to read from the diagram. Storage is shared and read-only except for each participant\'s own curated folder and their own MLflow experiment. The orchestrator issues instructions and never handles a row; the 20 million rows move between the shared volume and the Spark job, and the notebook pulls only 30 partitions of them. The notebook is where the two sources finally meet, and everything after that join is a few lines of code.'),
 ('h3','1   Stage 1 - Look at the raw data'),
 ('p','Inspect the 180 daily folders on the shared volume and confirm why a raw event log cannot be trained on: many rows per person, no outcome.'),
 ('h3','2   Stage 2 - Explore the label with EzPresto'),
@@ -279,8 +281,8 @@ BLOCKS=[
 ('h3','Part 1.2 - Set your student number'),
 ('p','This is the only cell you edit. Everything else, which folder you read, what your experiment is called, what your model is named, is built from this number.'),
 ('numbers',[
- 'In the code cell, find the line `STUDENT_ID = 0`.',
- 'Replace the `0` with your own student number, without leading zeros. Student 7 types `7`.',
+ 'In the code cell, find the line that begins `STUDENT_ID =`. It is the first assignment, marked with the comment CHANGE THIS TO YOUR NUMBER.',
+ 'Replace the value after the equals sign with your own student number, without leading zeros. Student 7 types `7`. The line below it pads the number to two digits for you.',
  'Run the cell.',
 ]),
 ('figure','shots/09c_student_id.png','Part 1.2. Replace the value after STUDENT_ID with your own student number before running the cell.'),

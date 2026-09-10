@@ -5,6 +5,7 @@ A missing file renders as a labelled placeholder box at the right position.
 
 | File | What it shows |
 |---|---|
+| 00_architecture.png | Architecture diagram, rendered from architecture/lab18_architecture.svg — present |
 | 02a_tools_ezpresto.png | Tools & Frameworks, EzPresto tile — present |
 | 02_data_catalog_select.png | Data Catalog: dataengineeringlab expanded, public ticked, subscribers selected — present |
 | 02b_selected_datasets.png | Selected Datasets panel with the Query Editor button — present |
@@ -21,7 +22,7 @@ A missing file renders as a labelled placeholder box at the right position.
 | 09a_jupyter_repo_folder.png | JupyterLab launcher, pcai-dataeng-lab folder — present |
 | 09b_jupyter_notebooks_folder.png | Inside pcai-dataeng-lab, notebooks folder — present |
 | 09_notebook_open.png | Notebook open with the Run button — present |
-| 09c_student_id.png | Part 1.2 cell with the STUDENT_ID value boxed — MISSING |
+| 09c_student_id.png | Part 1.2 cell with the STUDENT_ID value boxed — present |
 | 10_part3.png | Part 3 GPU output with the squash speed-up — present |
 | 11_part5b.png | Part 5b output: ALL PASS — present |
 | 12_part7.png | Part 7 output: feature importance and the noise spread — present |
