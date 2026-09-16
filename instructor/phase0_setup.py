@@ -103,7 +103,38 @@ S3 = dict(
 OUT       = os.path.join(LAB_DIR, "raw")
 EVENTS    = os.path.join(OUT, "watch_events")
 SUBS_CSV  = os.path.join(OUT, "subscribers.csv")
-MANIFEST  = os.path.join(OUT, "_manifest.json")
+MANIFEST  = os.path.join(LAB_DIR, "manifest.json")      # contract location
+MANIFEST_LEGACY = os.path.join(OUT, "_manifest.json")   # pre-2026-09 PCAI layout
+
+# Number of events the caller expects (`--events`). The count is emergent from the
+# seeded Poisson draw, not a knob, so it is an ACCEPTANCE TARGET rather than an
+# input: deliberately NOT part of DATA, because adding it would change run_id.
+EXPECTED_EVENTS = None
+
+
+def _apply_out_root(root):
+    """Point every output path at `root`. Used by --out-root so nothing is
+    hardcoded to a PCAI shared-volume location."""
+    global LAB_DIR, _LAB_DIR_SRC, OUT, EVENTS, SUBS_CSV, MANIFEST, MANIFEST_LEGACY
+    LAB_DIR, _LAB_DIR_SRC = os.path.abspath(root), "--out-root"
+    OUT       = os.path.join(LAB_DIR, "raw")
+    EVENTS    = os.path.join(OUT, "watch_events")
+    SUBS_CSV  = os.path.join(OUT, "subscribers.csv")
+    MANIFEST  = os.path.join(LAB_DIR, "manifest.json")
+    MANIFEST_LEGACY = os.path.join(OUT, "_manifest.json")
+
+
+def _world_readable(root):
+    """The dataset volume is RWX and read by pods running as a different uid than
+    the one that generated it. Without this the notebook pods get EACCES."""
+    n = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        try: os.chmod(dirpath, 0o755); n += 1
+        except OSError: pass
+        for f in filenames:
+            try: os.chmod(os.path.join(dirpath, f), 0o644); n += 1
+            except OSError: pass
+    return n
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -117,13 +148,15 @@ def ok(msg):    print(f"  \033[32m✓\033[0m {msg}")
 def bad(msg):   print(f"  \033[31m✗\033[0m {msg}")
 def info(msg):  print(f"    {msg}")
 
-def ensure_deps():
+def ensure_deps(need_s3=False):
     """Install what is missing. Distinguish 'not installed' from 'installed but
     broken' -- a numpy/pandas ABI mismatch is a different problem from a missing
     package, and pip installing over it will not help."""
     need, broken = [], []
-    for mod, pkg in [("numpy", "numpy"), ("pandas", "pandas"),
-                     ("psycopg2", "psycopg2-binary"), ("boto3", "boto3")]:
+    wanted = [("numpy", "numpy"), ("pandas", "pandas"), ("psycopg2", "psycopg2-binary")]
+    if need_s3:                       # boto3 is only for the optional S3 copy
+        wanted.append(("boto3", "boto3"))
+    for mod, pkg in wanted:
         try:
             __import__(mod)
         except ImportError:
@@ -179,10 +212,16 @@ def run_id():
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 def read_manifest():
-    if not os.path.exists(MANIFEST):
-        return None
-    with open(MANIFEST) as f:
-        return json.load(f)
+    """Read the manifest from the contract location, falling back to the legacy
+    PCAI one so an existing dataset is still recognised."""
+    for path in (MANIFEST, MANIFEST_LEGACY):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return None
+
 
 def require_manifest():
     m = read_manifest()
@@ -275,10 +314,15 @@ def stage_generate(force=False):
 
     # churners' activity tapers before they cancel -> low watch time in the
     # final 30 days. This is the signal the feature query surfaces.
-    u      = rng.random(total)
-    p_exp  = np.where(ev_churn == 1, DATA["recency_skew"], 1.0)
-    day_ix = np.minimum((u ** p_exp * DAYS).astype(np.int16), DAYS - 1)
-    del u, p_exp, ev_churn
+    # In place, to avoid materialising p_exp and its temporary (2 x 160 MB at
+    # 20 M rows). Identical values: non-churners take the exponent 1.0 branch,
+    # and u ** 1.0 == u exactly.
+    u = rng.random(total)
+    churner = ev_churn == 1
+    np.power(u, DATA["recency_skew"], out=u, where=churner)
+    u *= DAYS
+    day_ix = np.minimum(u.astype(np.int16), DAYS - 1)
+    del u, churner, ev_churn
 
     watch     = np.clip(rng.lognormal(3.2, 0.75, total), 1, 240).astype(np.float32)
     completed = (rng.random(total) < (0.45 + 0.075 * np.clip(ev_engz, -2, 2))).astype(np.int8)
@@ -330,6 +374,26 @@ def stage_generate(force=False):
         ok(f"signal present — churners {m1:.0f} min vs non-churners {m0:.0f} min "
            f"in the final 30 days")
 
+    if EXPECTED_EVENTS is not None and total != EXPECTED_EVENTS:
+        bad(f"event count {total:,} != --events {EXPECTED_EVENTS:,}")
+        info("the count is emergent from the seed, not a knob. Either the seed or a")
+        info("generation constant differs from the reference configuration.")
+
+    info("hashing daily files for the manifest ...")
+    files = []
+    for d in sorted(os.listdir(EVENTS)):
+        p = os.path.join(EVENTS, d, "events.csv")
+        if not os.path.isfile(p):
+            continue
+        h = hashlib.sha256()
+        rows = -1                                   # header does not count
+        with open(p, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block); rows += block.count(b"\n")
+        files.append({"dt": d[3:], "rows": rows,
+                      "bytes": os.path.getsize(p), "sha256": h.hexdigest()})
+
+    import numpy as _np, pandas as _pdv
     manifest = {
         "run_id":      run_id(),
         "config":      {k: str(v) for k, v in DATA.items()},
@@ -340,10 +404,18 @@ def stage_generate(force=False):
         "churn_rate":  float(churn.mean()),
         "minutes_churn":    float(m1),
         "minutes_nonchurn": float(m0),
+        "expected_events":  EXPECTED_EVENTS,
+        "python":      sys.version.split()[0],
+        "libraries":   {"numpy": _np.__version__, "pandas": _pdv.__version__},
+        "files":       files,
     }
-    with open(MANIFEST, "w") as f:
+    with open(MANIFEST, "w") as f:                  # contract location only
         json.dump(manifest, f, indent=2)
-    ok(f"manifest written — run_id {manifest['run_id']}")
+    ok(f"manifest written — run_id {manifest['run_id']}, "
+       f"{len(files)} files hashed")
+
+    n_chmod = _world_readable(LAB_DIR)
+    ok(f"permissions — {n_chmod:,} paths made world-readable (0644/0755)")
     return manifest
 
 
@@ -495,6 +567,22 @@ def stage_verify():
     results.append(("local: daily partitions", n_dirs == m["n_days"], f"{n_dirs}"))
     results.append(("local: manifest run_id", True, m["run_id"]))
 
+    # Row counts straight off disk, so this is independent of the manifest that
+    # generation wrote -- the point of a verify stage.
+    on_disk = 0
+    for d in sorted(os.listdir(EVENTS)):
+        p = os.path.join(EVENTS, d, "events.csv")
+        if not os.path.isfile(p):
+            continue
+        with open(p, "rb") as f:
+            on_disk += sum(b.count(b"\n") for b in iter(lambda: f.read(1 << 20), b"")) - 1
+    results.append(("local: event rows on disk", on_disk == m["n_events"],
+                    f"{on_disk:,}"))
+    target = EXPECTED_EVENTS or m.get("expected_events")
+    if target is not None:
+        results.append(("local: matches --events target", on_disk == target,
+                        f"{on_disk:,} vs {target:,}"))
+
     # postgres
     try:
         import psycopg2
@@ -504,9 +592,13 @@ def stage_verify():
         cur.execute("""SELECT has_table_privilege(rolname,'public.subscribers','SELECT')
                        FROM pg_roles WHERE rolcanlogin""")
         all_read = all(r[0] for r in cur.fetchall())
-        cur.close(); conn.close()
+        cur.execute("SELECT round(avg(churned_next_30d), 4) FROM public.subscribers")
+        rate = float(cur.fetchone()[0])
         results.append(("postgres: row count", n == m["n_subs"], f"{n:,}"))
         results.append(("postgres: all roles can SELECT", all_read, str(all_read)))
+        results.append(("postgres: churn base rate", abs(rate - m["churn_rate"]) < 0.001,
+                        f"{rate:.4f}"))
+        cur.close(); conn.close()
     except Exception as e:
         results.append(("postgres", False, str(e)[:60]))
 
@@ -534,7 +626,11 @@ def stage_verify():
     failed = [r[0] for r in results if not r[1]]
     print(f"\n{'━' * 72}")
     if failed:
-        print(f"  \033[31mFAILED\033[0m — {', '.join(failed)}")
+        # Named on stderr: the seed Job has backoffLimit 0, so this line is the
+        # only record of why the pod stopped.
+        msg = f"FAILED — {', '.join(failed)}"
+        print(f"  \033[31m{msg}\033[0m")
+        print(f"phase0_setup: {msg}", file=sys.stderr)
         sys.exit(1)
     print("  \033[32mPHASE 0 COMPLETE\033[0m")
     print(f"{'━' * 72}")
@@ -547,34 +643,37 @@ def stage_verify():
   Spark sees the same files at:
       file:///mounts/shared-volume/shared/data-engineering-lab/raw/watch_events
 """)
-    print("─" * 72)
-    print("  NEXT")
-    print("─" * 72)
-    print(f"""
-  1. Register Postgres as a Data Source (PCAI UI), then verify in the EzPresto
-     worksheet -- ONE statement at a time, NO trailing semicolon:
-
-         SHOW CATALOGS
-         SELECT count(*) FROM dataengineeringlab.public.subscribers
-         -- expected: {m['n_subs']}
-
-  2. Put the Spark job on the volume:
-         python spark/place_on_shared_volume.py
-
-  3. Run it once via Create Spark Application (Type=Python, Source=Shared Folder).
-     See SETUP.md step 4 for the three arguments.
-
-  Hive is NOT part of this pipeline -- PCAI's metastore is incompatible with
-  EzPresto's client. EzPresto reads Postgres only; the events/subscribers join
-  happens on the GPU in the notebook. See CLAUDE.md.
-""")
+    print(f"  dataset root : {LAB_DIR}")
+    print(f"  manifest     : {MANIFEST}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Phase 0 setup for the PCAI churn lab")
+    ap = argparse.ArgumentParser(
+        description="Phase 0 — generate the churn dataset, seed Postgres, verify.",
+        epilog="Every flag has a default, so a bare run reproduces the reference "
+               "dataset (run_id 219e36766df2). The Postgres password comes from "
+               "PGPASSWORD only — never a flag.")
     ap.add_argument("--stage", default="all",
-                    choices=["all", "generate", "postgres", "s3", "verify"])
+                    choices=["all", "generate", "seed", "postgres", "s3", "verify"],
+                    help="'seed' and 'postgres' are the same stage")
+    ap.add_argument("--out-root", metavar="DIR",
+                    help="dataset root. Writes raw/watch_events/dt=*/events.csv and "
+                         "manifest.json under it, and nothing outside it. "
+                         "Default: $LAB_DIR, else a discovered shared volume")
+    # Postgres coordinates (password is PGPASSWORD only — see G2)
+    ap.add_argument("--pg-host"); ap.add_argument("--pg-port", type=int)
+    ap.add_argument("--pg-db");   ap.add_argument("--pg-user")
+    # Dataset knobs. Changing any of these changes run_id, by design.
+    ap.add_argument("--seed", type=int, help="RNG seed (default 42)")
+    ap.add_argument("--days", type=int, help="number of daily partitions (default 180)")
+    ap.add_argument("--end-date", metavar="YYYY-MM-DD",
+                    help="date of the LAST partition; the start date is derived "
+                         "(default 2026-06-29)")
+    ap.add_argument("--subscribers", type=int, help="rows in subscribers (default 200000)")
+    ap.add_argument("--events", type=int,
+                    help="expected event count. The real count is emergent from the "
+                         "seed, so this is checked, not applied — a mismatch fails verify")
     ap.add_argument("--force-regenerate", action="store_true",
                     help="rebuild the dataset even if a matching manifest exists")
     ap.add_argument("--with-s3", action="store_true",
@@ -582,16 +681,36 @@ if __name__ == "__main__":
                          "it exists only so students can browse a real bucket.")
     a = ap.parse_args()
 
+    if a.stage == "seed":
+        a.stage = "postgres"
+
+    # ── apply overrides ────────────────────────────────────────────────────
+    if a.out_root: _apply_out_root(a.out_root)
+    for flag, key in (("pg_host", "host"), ("pg_port", "port"),
+                      ("pg_db", "dbname"), ("pg_user", "user")):
+        if getattr(a, flag) is not None:
+            PG[key] = getattr(a, flag)
+    if a.seed is not None:         DATA["seed"]   = a.seed
+    if a.days is not None:         DATA["n_days"] = a.days
+    if a.subscribers is not None:  DATA["n_subs"] = a.subscribers
+    if a.end_date:
+        try:
+            end = date.fromisoformat(a.end_date)
+        except ValueError:
+            sys.exit(f"\n  --end-date '{a.end_date}' is not YYYY-MM-DD\n")
+        DATA["start"] = end - timedelta(days=DATA["n_days"] - 1)
+    EXPECTED_EVENTS = a.events
+
     if a.stage in ("all", "postgres", "verify") and not PG["password"]:
         sys.exit("\n  PGPASSWORD is not set.\n"
                  "  This script connects to Postgres as the SUPERUSER. Export it first:\n"
                  "      export PGPASSWORD='<superuser password>'\n")
 
-    print(f"\n  PCAI churn lab — Phase 0")
-    print(f"  lab dir : {LAB_DIR}   [{_LAB_DIR_SRC}]")
+    print(f"\n  Churn lab — Phase 0")
+    print(f"  out root: {LAB_DIR}   [{_LAB_DIR_SRC}]")
     print(f"  postgres: {PG['host']}/{PG['dbname']} as {PG['user']}")
     print(f"  run_id  : {run_id()}\n")
-    ensure_deps()
+    ensure_deps(need_s3=(a.stage == "s3" or a.with_s3))
     if "not shared" in _LAB_DIR_SRC:
         bad("data is going to the HOME directory, not a shared volume.")
         info("Fine for a solo run. For the lab, other pods must reach these files —")

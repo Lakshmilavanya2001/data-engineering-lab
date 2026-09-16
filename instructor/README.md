@@ -31,6 +31,43 @@ python phase0_setup.py --with-s3           # also populate the browsable bucket
 python phase0_setup.py --force-regenerate  # rebuild the dataset from scratch
 ```
 
+### Running it anywhere else
+
+Every path and coordinate is a flag, so nothing is tied to a PCAI shared volume:
+
+```bash
+python phase0_setup.py --stage all \
+  --out-root /data \
+  --pg-host <host> --pg-port 5432 --pg-db app_db --pg-user postgres \
+  --seed 42 --days 180 --end-date 2026-06-29 \
+  --events 20010929 --subscribers 200000
+```
+
+`--stage seed` is an alias for `--stage postgres`. `--events` is an **acceptance
+target**, not an input: the count is emergent from the seeded draw, so a mismatch is
+reported rather than forced. Changing `--seed`, `--days`, `--end-date` or
+`--subscribers` changes the `run_id`, which is how a reduced dataset is prevented from
+passing as the reference one.
+
+A reduced dataset for rehearsals or CI takes under a second:
+
+```bash
+python phase0_setup.py --stage generate --out-root /tmp/small \
+  --seed 42 --days 10 --subscribers 5000 --end-date 2026-06-29
+python3 test_phase0.py --out-root /tmp/small --reduced
+```
+
+### Checking it
+
+`test_phase0.py` runs the acceptance suite: manifest and shape, schema and
+cleanliness, distributions. Against a full regeneration it is 32 of 32; the Postgres
+checks are skipped rather than failed when no `--pg-host` is given.
+
+```bash
+python3 test_phase0.py --out-root <root>                       # CSV only
+python3 test_phase0.py --out-root <root> --pg-host <host>      # and the database
+```
+
 `--stage verify` needs no write access, so anyone can use it to confirm the foundation.
 A healthy run prints five ticks:
 
@@ -48,7 +85,7 @@ A healthy run prints five ticks:
 |---|---|---|
 | `raw/watch_events/dt=YYYY-MM-DD/events.csv` | shared volume | 180 files, 849 MB, 20,010,929 rows |
 | `subscribers` | Postgres `app_db.public` | 200,000 rows, churn rate 0.119 |
-| `_manifest.json` | shared volume | stamps the run id both halves share |
+| `manifest.json` | out-root | run id, counts, per-file sha256, library versions |
 
 The S3 copy is read by nothing. It exists only so participants can browse a real bucket
 and see that object storage has keys rather than folders. Skip it and the lab is unaffected.
@@ -68,6 +105,9 @@ data whose run id does not match. Use it rather than calling `generate_data.py` 
 |---|---|
 | `phase0_setup.py` | The one command above. Generate, seed, optional S3 copy, verify. |
 | `generate_data.py` | The standalone generator, kept as a readable reference for how the dataset and its label are constructed. `phase0_setup.py` contains the same logic. |
+| `test_phase0.py` | Acceptance suite for a generated dataset. |
+| `requirements.txt` | Runtime pins. numpy 2.4+ and pandas 3.0+; the output is identical across that range. |
+| `DEVELOPER-RESPONSE.md` | Reply to the platform team's rewrite specification, and the record of what the interface contract required. |
 
 Two older scripts, `seed_postgres.py` and `upload_raw_to_s3.py`, are superseded by
 `phase0_setup.py` and are deliberately **not** included — they carry a stale namespace and

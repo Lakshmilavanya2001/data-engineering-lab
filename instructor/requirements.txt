@@ -1,0 +1,14 @@
+# Runtime for phase0_setup.py and test_phase0.py.
+# No Spark, no cuDF, no network access beyond Postgres.
+#
+# The reference dataset (run_id 219e36766df2) was originally generated on the PCAI
+# notebook image with numpy 2.4.6 / pandas 3.0.3, and reproduced byte-for-byte on
+# 2026-09-16 with numpy 2.5.3 / pandas 3.0.5 on Python 3.12.3 — identical row
+# counts, identical per-file sha256, identical distributions. So the pins below are
+# a floor, not a lock: the generator is stable across that range.
+numpy>=2.4,<3
+pandas>=3.0,<4
+psycopg2-binary>=2.9
+
+# Optional, and only for `--stage s3`, which nothing in the lab reads:
+# boto3>=1.34
