@@ -5,6 +5,24 @@
 **Duration** ~3 h · **GPU required** Yes (1 slice per participant) · **Backend** HPE PCAI
 **Status** 🚧 In build — proven end to end for a single participant
 
+## Repository layout
+
+| Path | For | Contents |
+|---|---|---|
+| `instructor/` | instructor, before the session | `phase0_setup.py` — generate the dataset, seed Postgres, verify. Run once per cluster. |
+| `dags/` | Airflow via git-sync | `churn_pipeline_dag.py`, one parameterised DAG for every participant |
+| `notebooks/` | participants | `Lab18_Train_Churn_Model.ipynb`, 11 parts plus the validation sub-part |
+| `spark/` | the Spark job | `curate_events.py`, submitted by the DAG or the wizard |
+| `sql/` | participants | EzPresto worksheet queries with expected results |
+| `guide/` | participants | Lab guide (PDF and Word), slide deck, architecture diagram, screenshots |
+| `docs/` | participants | Validation checklist, data-readiness page, value-statement exercise |
+| `setup_notebook_env.sh` | participants | One-time RAPIDS install on a notebook server |
+
+**Before anything else**, the instructor runs `instructor/phase0_setup.py` once — see
+`instructor/README.md`. Everything else assumes the data is already on the shared volume
+and in Postgres.
+
+
 ## What this lab does
 Takes **20 million raw event rows** sitting in object storage and turns them into a
 **200,000-row training table**, trains a churn model on the GPU, versions it in MLflow, and
